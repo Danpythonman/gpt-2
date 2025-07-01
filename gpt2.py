@@ -222,6 +222,12 @@ class GPT(nn.Module):
     def __init__(self, n_layer: int, n_head: int, n_embd: int, block_size: int, vocab_size: int):
         super().__init__()
 
+        self.n_layer = n_layer
+        self.n_head = n_head
+        self.n_embd = n_embd
+        self.block_size = block_size
+        self.vocab_size = vocab_size
+
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(vocab_size, n_embd),
             wpe = nn.Embedding(block_size, n_embd),
@@ -236,18 +242,18 @@ class GPT(nn.Module):
         if T > self.block_size:
             raise Exception('Sequence length is larger than block size')
 
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
-        pos_emb = self.transformer.wpe(pos)
-        tok_emb = self.transformer.wte(idx)
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # (T,)
+        pos_emb = self.transformer.wpe(pos) # (T, n_embd)
+        tok_emb = self.transformer.wte(idx) # (B, T, n_embd)
 
-        x = tok_emb + pos_emb
+        x = tok_emb + pos_emb # (B, T, n_embd)
 
         for block in self.transformer.h:
             x = block(x)
 
         x = self.transformer.ln_f(x)
 
-        logits = self.lm_head(x)
+        logits = self.lm_head(x) # (B, T, vocab_size)
 
         return logits
 
