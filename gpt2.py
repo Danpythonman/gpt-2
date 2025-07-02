@@ -1,3 +1,4 @@
+import abc
 import math
 
 import torch
@@ -5,8 +6,7 @@ import torch.nn as nn
 from torch import Tensor
 from torch.nn import functional as F
 
-
-class CausalSelfAttention(nn.Module):
+class CausalSelfAttention(nn.Module, abc.ABC):
     '''
     Causal multi-head self-attention.
     '''
@@ -76,6 +76,15 @@ class CausalSelfAttention(nn.Module):
         self.c_proj.INIT_SCALE_DOWN = True
 
     def forward(self, x: Tensor) -> Tensor:
+        raise NotImplementedError
+
+
+class ManualCausalSelfAttention(CausalSelfAttention):
+    '''
+    Causal multi-head self-attention with manual attention calculations.
+    '''
+
+    def forward(self, x: Tensor) -> Tensor:
         # Shape is `(batch, time, channel)` which corresponds to
         # `(batch, block_size, n_embd)`
         B, T, C = x.shape
@@ -107,6 +116,45 @@ class CausalSelfAttention(nn.Module):
         att = F.softmax(att, dim=-1)
 
         y = att @ v # (B, nh, T, T) @ (B, nh, T, hs) -> (B, nh, T, hs)
+
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # (B, nh, T, hs) -> (B, T, C)
+
+        y = self.c_proj(y) # (B, T, C) -> (B, T, C)
+
+        return y
+
+
+class FlashCausalSelfAttention(CausalSelfAttention):
+    '''
+    Causal multi-head self-attention using flash attention calculation via
+    PyTorch's function:
+
+        torch.n.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+    '''
+
+    def forward(self, x: Tensor) -> Tensor:
+        # Shape is `(batch, time, channel)` which corresponds to
+        # `(batch, block_size, n_embd)`
+        B, T, C = x.shape
+
+        qkv: Tensor = self.c_attn(x) # (B, T, C) -> (B, T, C*3)
+
+        # Splitting across the second dimension of the `(B, T, C*3)` tensor with
+        # split size `n_embd = C` yields three tensors of size `(B, T, C)`
+        q: Tensor
+        k: Tensor
+        v: Tensor
+        q, k, v = qkv.split(self.n_embd, dim=2)
+
+        # Split the channel dimension into multiple heads
+        nh = self.n_head
+        hs = C // nh
+        k = k.view(B, T, nh, hs).transpose(1, 2) # (B, T, C) -> (B, nh, T, hs)
+        q = q.view(B, T, nh, hs).transpose(1, 2) # (B, T, C) -> (B, nh, T, hs)
+        v = v.view(B, T, nh, hs).transpose(1, 2) # (B, T, C) -> (B, nh, T, hs)
+
+        # Flash attention calculation
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # (B, nh, T, hs)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C) # (B, nh, T, hs) -> (B, T, C)
 
@@ -188,13 +236,16 @@ class Block(nn.Module):
     Fully connected layer after the second layer normalization is applied.
     '''
 
-    def __init__(self, n_head: int, n_embd: int, block_size: int):
+    def __init__(self, n_head: int, n_embd: int, block_size: int, flash_attention: bool = True):
         super().__init__()
 
         self.n_embd = n_embd
 
         self.ln_1 = nn.LayerNorm(n_embd)
-        self.attn = CausalSelfAttention(n_head, n_embd, block_size)
+        if flash_attention:
+            self.attn = FlashCausalSelfAttention(n_head, n_embd, block_size)
+        else:
+            self.attn = ManualCausalSelfAttention(n_head, n_embd, block_size)
         self.ln_2 = nn.LayerNorm(n_embd)
         self.mlp = MLP(n_embd)
 
@@ -223,7 +274,7 @@ class GPT(nn.Module):
     Language model head.
     '''
 
-    def __init__(self, n_layer: int, n_head: int, n_embd: int, block_size: int, vocab_size: int):
+    def __init__(self, n_layer: int, n_head: int, n_embd: int, block_size: int, vocab_size: int, flash_attention: bool = True):
         super().__init__()
 
         self.n_layer = n_layer
@@ -235,7 +286,7 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(vocab_size, n_embd),
             wpe = nn.Embedding(block_size, n_embd),
-            h = nn.ModuleList([Block(n_head, n_embd, block_size) for _ in range(n_layer)]),
+            h = nn.ModuleList([Block(n_head, n_embd, block_size, flash_attention) for _ in range(n_layer)]),
             ln_f = nn.LayerNorm(n_embd)
         ))
         self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
@@ -301,7 +352,17 @@ class GPT(nn.Module):
         return logits
 
     @classmethod
-    def from_pretrained(cls, model_type: str):
+    def default(cls) -> 'GPT':
+        return GPT(
+            n_layer=12,
+            n_head=12,
+            n_embd=768,
+            block_size=1024,
+            vocab_size=50_257
+        )
+
+    @classmethod
+    def from_pretrained(cls, model_type: str) -> 'GPT':
         config_args = {
             'gpt2': dict(n_layer=12, n_head=12, n_embd=768),
             'gpt2-medium': dict(n_layer=24, n_head=16, n_embd=1024),
@@ -355,11 +416,3 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
-
-gpt = GPT(
-    n_layer=12,
-    n_head=12,
-    n_embd=768,
-    block_size=1024,
-    vocab_size=50_257
-)
