@@ -73,6 +73,8 @@ class CausalSelfAttention(nn.Module):
                 .unsqueeze(0)
         )
 
+        self.c_proj.INIT_SCALE_DOWN = True
+
     def forward(self, x: Tensor) -> Tensor:
         # Shape is `(batch, time, channel)` which corresponds to
         # `(batch, block_size, n_embd)`
@@ -146,6 +148,8 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(n_embd, n_embd * 4)
         self.gelu = nn.GELU()
         self.c_proj = nn.Linear(n_embd * 4, n_embd)
+
+        self.c_proj.INIT_SCALE_DOWN = True
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.c_fc(x)
@@ -236,6 +240,45 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
 
+        # Parameter sharing
+        self.transformer.wte.weight = self.lm_head.weight
+        self.transformer.wpe.WPE_INIT = True
+
+        # Initialize weights of this module's parameters
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        '''
+        Initialization of parameters according to OpenAI's GPT-2 implementation.
+
+        Most of the weight matrices are initialized to a normal distribution
+        with a mean of 0.0 and a standard deviation of 0.02. The bias vectors
+        are initialized to 0. The position embedding matrix differs in that it
+        is initialized with a standard deviation of 0.01.
+
+        Additionally residual connections have their weights scaled down by
+        `1/sqrt(n_layer)` to keep the standard deviation close to 1.
+
+        See https://github.com/openai/gpt-2/blob/master/src/model.py
+        '''
+
+        if isinstance(module, nn.Linear):
+            if hasattr(module, 'INIT_SCALE_DOWN'):
+                # `n_layer` is multiplied by 2 because there are two residual
+                # connections in each `Block`
+                std = (2 * self.n_layer) ** -0.5
+            else:
+                std = 0.02
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            if hasattr(module, 'WPE_INIT'):
+                std = 0.01
+            else:
+                std = 0.02
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+
     def forward(self, idx: Tensor) -> Tensor:
         B, T = idx.shape
 
@@ -312,3 +355,11 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
+
+gpt = GPT(
+    n_layer=12,
+    n_head=12,
+    n_embd=768,
+    block_size=1024,
+    vocab_size=50_257
+)
