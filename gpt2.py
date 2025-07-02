@@ -1,5 +1,7 @@
 import abc
+import inspect
 import math
+import typing
 
 import torch
 import torch.nn as nn
@@ -194,7 +196,7 @@ class MLP(nn.Module):
         self.n_embd = n_embd
 
         self.c_fc = nn.Linear(n_embd, n_embd * 4)
-        self.gelu = nn.GELU()
+        self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(n_embd * 4, n_embd)
 
         self.c_proj.INIT_SCALE_DOWN = True
@@ -317,7 +319,7 @@ class GPT(nn.Module):
             if hasattr(module, 'INIT_SCALE_DOWN'):
                 # `n_layer` is multiplied by 2 because there are two residual
                 # connections in each `Block`
-                std = (2 * self.n_layer) ** -0.5
+                std = 0.02 * (2 * self.n_layer) ** -0.5
             else:
                 std = 0.02
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
@@ -329,6 +331,59 @@ class GPT(nn.Module):
             else:
                 std = 0.02
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+
+    def configure_optimizer(
+        self,
+        weight_decay: float,
+        learning_rate: float,
+        betas: typing.Tuple[float, float],
+        eps: float,
+        device: torch.device
+    ) -> torch.optim.Optimizer:
+        '''
+        Sets up the AdamW optimizer with weight decay on the weight matrices.
+        '''
+
+        param_dict = {
+            name: parameter
+                for name, parameter in self.named_parameters()
+                if parameter.requires_grad
+        }
+
+        # Weight matrices will be weight-decayed, bias vectors will be not
+        decay_params, non_decay_params = [], []
+        for parameter in param_dict.values():
+            if parameter.dim() >= 2:
+                decay_params.append(parameter)
+            else:
+                non_decay_params.append(parameter)
+
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': non_decay_params, 'weight_decay': 0.0}
+        ]
+
+        print(
+            f'Decayed parameter tensors: {len(decay_params)} '
+            f'({sum(p.numel() for p in decay_params):,} total decayed '
+            f'parameters)\nNon-decayed parameter tensors: '
+            f'{len(non_decay_params)} '
+            f'({sum(p.numel() for p in non_decay_params):,} total non-decayed '
+            f'parameters'
+        )
+
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        using_cuda = 'cuda' in device
+        use_fused = fused_available and using_cuda
+        print(f'Using fused: {use_fused}')
+
+        return torch.optim.AdamW(
+            optim_groups,
+            lr=learning_rate,
+            betas=betas,
+            eps=eps,
+            fused=use_fused
+        )
 
     def forward(self, idx: Tensor) -> Tensor:
         B, T = idx.shape
