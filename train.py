@@ -1,27 +1,52 @@
-import math
-from pathlib import Path
-import time
-import typing
+from logging_init import get_main_logger, get_worker_logger, get_null_logger
 
-import matplotlib.pyplot as plt
-import numpy as np
-from scipy.stats import gaussian_kde
+import os
+from pathlib import Path
+
 import torch
 from torch.nn import functional as F
+from torch.distributed import destroy_process_group, init_process_group
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from dataloader import DataLoader
 from gpt2 import GPT
 from lr_scheduler import GPT2CosineLearningRateScheduler
 
 
-if torch.cuda.is_available():
-    device = 'cuda'
-elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-    device = 'mps'
-else:
-    device = 'cpu'
+using_ddp = int(os.environ.get('RANK', -1)) != -1
+if using_ddp:
+    if not torch.cuda.is_available():
+        raise Exception('Need CUDA for DDP')
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)
+    main_logger = get_main_logger() if ddp_rank == 0 else get_null_logger()
+    worker_logger = get_worker_logger(ddp_rank)
 
-print(f'Using device: {device}')
+    main_logger.info('Using DDP')
+    worker_logger.info(f'Worker {ddp_rank} using device: {device}')
+else:
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    if torch.cuda.is_available():
+        device = 'cuda'
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        device = 'mps'
+    else:
+        device = 'cpu'
+    main_logger = get_main_logger()
+    worker_logger = main_logger
+
+    main_logger.info('Not using DDP')
+    main_logger.info(f'Using device: {device}')
+
+torch.manual_seed(1337)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(1337)
 
 torch.set_float32_matmul_precision('high')
 
@@ -40,18 +65,28 @@ if total_batch_size % mini_batch_size != 0:
 
 grad_accum_steps = int(total_batch_size / mini_batch_size)
 
-print(
+if grad_accum_steps % ddp_world_size != 0:
+    raise Exception('Total batch size is not divisible by number of GPUs')
+
+grad_accum_steps_per_gpu = grad_accum_steps / ddp_world_size
+
+main_logger.info(
     f'Total desired batch size is {total_batch_size:,} tokens, mini batch size '
     f'is {mini_batch_size:,} tokens ({mini_batches} examples of length '
     f'{block_size}), so gradients need to be accumulated for '
-    f'{grad_accum_steps} mini batches per batch'
+    f'{grad_accum_steps} mini batches per batch. Since we have '
+    f'{ddp_world_size} GPUs, each GPU will have a batch size of '
+    f'{grad_accum_steps_per_gpu}.'
 )
 
 data_loader = DataLoader(
     batch_size=mini_batches,
     block_size=block_size,
+    process_rank=ddp_rank,
+    number_of_processes=ddp_world_size,
     filepath=Path(__file__).parent / 'tiny-shakespeare.txt',
-    device=device
+    device=device,
+    logger=main_logger
 )
 
 model: GPT = GPT(
@@ -60,19 +95,28 @@ model: GPT = GPT(
     n_embd=n_embd,
     block_size=block_size,
     vocab_size=vocab_size,
-    flash_attention=True
+    flash_attention=True,
+    logger=main_logger
 )
 
-print('Moving model to GPU')
+worker_logger.info('Moving model to GPU')
 model.to(device)
 
-print('Compiling model')
+worker_logger.info('Compiling model')
 model = torch.compile(model)
+
+if using_ddp:
+    model = DDP(model, device_ids=[ddp_local_rank])
+
+if isinstance(model, DDP):
+    raw_model = model.module
+else:
+    raw_model = model
 
 max_steps = 50
 
-print('Configuring optimizer and learning rate scheduler')
-optimizer = model.configure_optimizer(
+worker_logger.info('Configuring optimizer and learning rate scheduler')
+optimizer = raw_model.configure_optimizer(
     weight_decay=0.1,
     learning_rate=6e-4,
     betas=(0.9, 0.95),
@@ -86,7 +130,7 @@ scheduler = GPT2CosineLearningRateScheduler(
     max_steps=max_steps
 )
 
-print(f'Training for {max_steps} iterations')
+worker_logger.info(f'Training for {max_steps} iterations')
 
 for step, (x, y) in enumerate(data_loader):
     if step == max_steps: break
@@ -100,9 +144,17 @@ for step, (x, y) in enumerate(data_loader):
             loss = F.cross_entropy(logits.view(-1, logits.shape[-1]), y.view(-1))
         loss /= grad_accum_steps
         accumulated_loss += loss.detach()
+        if using_ddp and isinstance(model, DDP):
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         loss.backward()
+
+    if using_ddp:
+        torch.distributed.all_reduce(accumulated_loss, op=torch.distributed.ReduceOp.AVG)
 
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     lr = scheduler.step(step)
     optimizer.step()
-    print(f'step: {step:>3} | loss: {accumulated_loss.item():9>.4f} | lr: {lr:8>.4e} | norm: {norm.item():8>.4f}')
+    main_logger.info(f'step: {step:>3} | loss: {accumulated_loss.item():9>.4f} | lr: {lr:8>.4e} | norm: {norm.item():8>.4f}')
+
+if using_ddp:
+    destroy_process_group()

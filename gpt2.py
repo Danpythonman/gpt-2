@@ -1,5 +1,8 @@
+from logging_init import get_main_logger
+
 import abc
 import inspect
+import logging
 import math
 import typing
 
@@ -7,6 +10,10 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.nn import functional as F
+
+
+main_logger = get_main_logger()
+
 
 class CausalSelfAttention(nn.Module, abc.ABC):
     '''
@@ -276,8 +283,21 @@ class GPT(nn.Module):
     Language model head.
     '''
 
-    def __init__(self, n_layer: int, n_head: int, n_embd: int, block_size: int, vocab_size: int, flash_attention: bool = True):
+    _logger: logging.Logger
+
+    def __init__(
+        self,
+        n_layer: int,
+        n_head: int,
+        n_embd: int,
+        block_size: int,
+        vocab_size: int,
+        flash_attention: bool = True,
+        logger: logging.Logger = main_logger
+    ):
         super().__init__()
+
+        self._logger = logger
 
         self.n_layer = n_layer
         self.n_head = n_head
@@ -363,7 +383,7 @@ class GPT(nn.Module):
             {'params': non_decay_params, 'weight_decay': 0.0}
         ]
 
-        print(
+        self._logger.info(
             f'Decayed parameter tensors: {len(decay_params)} '
             f'({sum(p.numel() for p in decay_params):,} total decayed '
             f'parameters)\nNon-decayed parameter tensors: '
@@ -375,7 +395,7 @@ class GPT(nn.Module):
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         using_cuda = 'cuda' in device
         use_fused = fused_available and using_cuda
-        print(f'Using fused: {use_fused}')
+        self._logger.info(f'Using fused: {use_fused}')
 
         return torch.optim.AdamW(
             optim_groups,
@@ -428,7 +448,7 @@ class GPT(nn.Module):
         if model_type not in config_args.keys():
             raise Exception('Invalid model type')
 
-        print(f'Loading weights from pretrained GPT {model_type}')
+        self._logger.info(f'Loading weights from pretrained GPT {model_type}')
 
         config = config_args[model_type]
         vocab_size = 50_257 # 256 byte tokens + 50,000 BPE merges + 1 <|endoftext|> token
