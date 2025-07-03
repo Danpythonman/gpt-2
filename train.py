@@ -42,11 +42,12 @@ data_loader = DataLoader(
 model: GPT = GPT(
     n_layer=n_layer,
     n_head=n_head,
-    n_embd=n_head,
+    n_embd=n_embd,
     block_size=block_size,
     vocab_size=vocab_size,
     flash_attention=True
 )
+
 model.to(device)
 model = torch.compile(model)
 
