@@ -1,14 +1,14 @@
-from logging_init import get_main_logger, get_worker_logger, get_null_logger
+from logging_init import get_main_logger, get_null_logger, get_worker_logger, TrainingLogger
 
+import datetime as dt
 import os
-from pathlib import Path
 
 import torch
 from torch.nn import functional as F
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from dataloader import DataLoader
+from dataloader import FineWebEdu10BDataLoader
 from gpt2 import GPT
 from lr_scheduler import GPT2CosineLearningRateScheduler
 
@@ -79,12 +79,12 @@ main_logger.info(
     f'{grad_accum_steps_per_gpu}.'
 )
 
-data_loader = DataLoader(
+data_loader = FineWebEdu10BDataLoader(
     batch_size=mini_batches,
     block_size=block_size,
+    split='train',
     process_rank=ddp_rank,
     number_of_processes=ddp_world_size,
-    filepath=Path(__file__).parent / 'tiny-shakespeare.txt',
     device=device,
     logger=main_logger
 )
@@ -113,7 +113,9 @@ if isinstance(model, DDP):
 else:
     raw_model = model
 
-max_steps = 50
+# max_steps = int(10e9 / total_batch_size) # 10,000,000,000 tokens of training data
+max_steps = 10
+warmup_steps = int(375e6 / 2**19) # GPT-3 training had 375,000,000 warmup steps
 
 worker_logger.info('Configuring optimizer and learning rate scheduler')
 optimizer = raw_model.configure_optimizer(
@@ -126,11 +128,15 @@ optimizer = raw_model.configure_optimizer(
 scheduler = GPT2CosineLearningRateScheduler(
     optimizer=optimizer,
     max_lr=6e-4,
-    warmup_steps=10,
+    warmup_steps=warmup_steps,
     max_steps=max_steps
 )
 
-worker_logger.info(f'Training for {max_steps} iterations')
+training_logger = TrainingLogger(main_logger, max_steps)
+
+worker_logger.info(f'Training for {max_steps} iterations ({warmup_steps} warmup steps)')
+
+previous_time = dt.datetime.now()
 
 for step, (x, y) in enumerate(data_loader):
     if step == max_steps: break
@@ -154,7 +160,10 @@ for step, (x, y) in enumerate(data_loader):
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     lr = scheduler.step(step)
     optimizer.step()
-    main_logger.info(f'step: {step:>3} | loss: {accumulated_loss.item():9>.4f} | lr: {lr:8>.4e} | norm: {norm.item():8>.4f}')
+
+    current_time = dt.datetime.now()
+    training_logger.log(current_time, previous_time, step, accumulated_loss, lr, norm)
+    previous_time = current_time
 
 if using_ddp:
     destroy_process_group()

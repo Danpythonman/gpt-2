@@ -11,7 +11,7 @@ from scipy.stats import gaussian_kde
 import torch
 from torch.nn import functional as F
 
-from dataloader import DataLoader
+from dataloader import ShakespeareDataLoader
 from gpt2 import GPT
 
 
@@ -31,7 +31,7 @@ def print_title(title: str) -> None:
     print('=' * len(title))
 
 
-def print_diagnostics(loss: torch.types.Number, t0: float, t1: float, data_loader: DataLoader) -> None:
+def print_diagnostics(loss: torch.types.Number, t0: float, t1: float, data_loader: ShakespeareDataLoader) -> None:
     dt = t1 - t0
     tokens_per_sec = int(data_loader._batch_size * data_loader._block_size // dt)
     print(f'step {i:>3}, loss: {loss:>8.4f}, dt: {dt*1000:<8.4f}ms, tokens/sec: {tokens_per_sec:<8,d}')
@@ -53,7 +53,7 @@ n_layer = 8
 n_head = 8
 n_embd = 768
 
-data_loader = DataLoader(
+data_loader = ShakespeareDataLoader(
     batch_size=batch_size,
     block_size=block_size,
     filepath=Path(__file__).parent / 'tiny-shakespeare.txt',
@@ -103,7 +103,7 @@ n_layer = 8
 n_head = 8
 n_embd = 768
 
-data_loader = DataLoader(
+data_loader = ShakespeareDataLoader(
     batch_size=batch_size,
     block_size=block_size,
     filepath=Path(__file__).parent / 'tiny-shakespeare.txt',
@@ -152,7 +152,7 @@ n_layer = 8
 n_head = 8
 n_embd = 768
 
-data_loader = DataLoader(
+data_loader = ShakespeareDataLoader(
     batch_size=batch_size,
     block_size=block_size,
     filepath=Path(__file__).parent / 'tiny-shakespeare.txt',
@@ -203,7 +203,7 @@ n_layer = 8
 n_head = 8
 n_embd = 768
 
-data_loader = DataLoader(
+data_loader = ShakespeareDataLoader(
     batch_size=batch_size,
     block_size=block_size,
     filepath=Path(__file__).parent / 'tiny-shakespeare.txt',
@@ -254,7 +254,7 @@ n_layer = 8
 n_head = 8
 n_embd = 768
 
-data_loader = DataLoader(
+data_loader = ShakespeareDataLoader(
     batch_size=batch_size,
     block_size=block_size,
     filepath=Path(__file__).parent / 'tiny-shakespeare.txt',
@@ -307,7 +307,7 @@ n_layer = 8
 n_head = 8
 n_embd = 768
 
-data_loader = DataLoader(
+data_loader = ShakespeareDataLoader(
     batch_size=batch_size,
     block_size=block_size,
     filepath=Path(__file__).parent / 'tiny-shakespeare.txt',
