@@ -448,7 +448,7 @@ class GPT(nn.Module):
         if model_type not in config_args.keys():
             raise Exception('Invalid model type')
 
-        self._logger.info(f'Loading weights from pretrained GPT {model_type}')
+        print(f'Loading weights from pretrained GPT {model_type}')
 
         config = config_args[model_type]
         vocab_size = 50_257 # 256 byte tokens + 50,000 BPE merges + 1 <|endoftext|> token
